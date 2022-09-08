@@ -149,4 +149,147 @@ SOCKET WSPSocket(
    - 在SockAsyncSelectCompletion函数中找到SockProcessAsyncSelect：![](./image/SockAsyncSelectCompletion.png)
    - 在SockProcessAsyncSelect中找到AsyncSelect真正实现原理：![](./image/SockProcessAsyncSelect.png)
    - （别问我怎么找的，参看ReactOS源码就会很清晰）
+   - 图中的操作应该是轮询实现的，效率比较低。
+   - 不过别忘了，NtDeviceIoControlFile是提供了APCRoutine的接口的。
+   - **实际上只需要给NtDeviceIoControlFile以APCRoutine接口，就可以实现无需轮询的AsyncSelect**。
+   - 大致实现：
+```cpp
+NTSTATUS WSPProcessAsyncSelect(
+	SOCKET Handle,
+	PVOID ApcRoutine,
+	ULONG lNetworkEvents,
+	PVOID UserContext
+) {
+	/// <summary>
+	/// WSPProcessAsyncSelect是本程序最大的亮点，利用异步化的IOCTL_AFD_SELECT
+	/// </summary>
+	/// <param name="Handle"></param>
+	/// <param name="ApcRoutine"></param>
+	/// <param name="lNetworkEvents"></param>
+	/// <returns></returns>
+	AFD_AsyncData* AsyncData = (AFD_AsyncData*)malloc(sizeof(AFD_AsyncData));
+	if (AsyncData == NULL)
+	{
+		return -1;
+	}
+	memset(AsyncData, 0, sizeof(AFD_AsyncData));
+	AsyncData->NowSocket = Handle;
+	AsyncData->PollInfo.Timeout.HighPart = 0x7FFFFFFF;
+	AsyncData->PollInfo.Timeout.LowPart = 0xFFFFFFFF;
+	AsyncData->PollInfo.HandleCount = 1;
+	AsyncData->PollInfo.Handle = Handle;
+	AsyncData->PollInfo.Events = lNetworkEvents;
+	AsyncData->UserContext = UserContext;
+	NTSTATUS Status;
+	Status = ((NtDeviceIoControlFile)(MyNtDeviceIoControlFile))((HANDLE)Handle,
+		NULL,
+		ApcRoutine,
+		AsyncData,
+		&AsyncData->IOSB,
+		IOCTL_AFD_SELECT,
+		&AsyncData->PollInfo,
+		sizeof(AFD_PollInfo),
+		&AsyncData->PollInfo,
+		sizeof(AFD_PollInfo));
+	return Status;
+}
+```
+   - 既然已经做出了肌醇函数，剩下的就是封装了。
+   - 我封装了“WSPClient”和“WSPServer”两个类（一个客户端，一个服务端）
+   - 虽然功能不是很齐全，但是至少是能用的。
+   - 主体说一下WSPServer的AsyncSelect：
+   - 核心源码：
+```cpp
+VOID __stdcall internal_APCRoutine(
+	PVOID ApcContext,
+	PIO_STATUS_BLOCK IoStatusBlock,
+	PVOID Reserved)
+{
+	/// <summary>
+	/// 这是一个内部函数，也是本程序最大的亮点：APC异步select
+	/// Client和服务器socket的select情况会全部调用这个函数，本函数用于分发回调事件。
+	/// </summary>
+	/// <param name="ApcContext"></param>
+	/// <param name="IoStatusBlock"></param>
+	/// <param name="Reserved"></param>
+	/// <returns></returns>
+	AFD_AsyncData* AsyncData = (AFD_AsyncData*)ApcContext;
+	//读取出ApcContext，保存的是AsyncData，AsyncData的详细使用情况请看WSPProcessAsyncSelect函数的实现。
+	WSPServer* self = (WSPServer*)AsyncData->UserContext;
+	//读取出WSPServer对象，这个主要是读取出回调函数地址。
+	//然后调用回调函数，参数是socket句柄和事件信息
+	((WSPServerCallBack)self->m_CallBack)(AsyncData->NowSocket, AsyncData->PollInfo.Events);
+	//开启下一次APC异步select
+	WSPProcessAsyncSelect(AsyncData->NowSocket, internal_APCRoutine, self->m_EnableEvent, (PVOID)self);
+	//释放掉原来的AsyncData
+	free(AsyncData);
+}
 
+
+VOID WSPServer::internal_APCThread(WSPServer* Server) {
+	/// <summary>
+	/// 本函数是APC异步select的线程函数，用于开启每个socket的APC异步select
+	/// </summary>
+	/// <param name="Server">WSPServer对象</param>
+	int i = 0;
+	while (1) {
+		EnterCriticalSection(&Server->m_CriticalSection);
+		if (!Server->IsRun) {
+			//已经通知本线程退出
+			LeaveCriticalSection(&Server->m_CriticalSection);
+			break;
+		}
+		i = Server->m_NeedAPCSocket.size();
+		i--;
+		for (i; i >= 0; i--) {
+			//将m_NeedAPCSocket每一socket读取出来，开启APC异步select
+			WSPProcessAsyncSelect(
+				Server->m_NeedAPCSocket[i],
+				internal_APCRoutine,
+				Server->m_EnableEvent, 
+				(PVOID)Server
+			);
+			//后面的APC异步select过程将由函数internal_APCRoutine完成
+			Server->m_NeedAPCSocket.pop_back();
+			//删除m_NeedAPCSocket对应的socket
+		}
+		LeaveCriticalSection(&Server->m_CriticalSection);
+		SleepEx(1, true);
+	}
+}
+
+HANDLE WSPServer::APCAsyncSelect(
+	WSPServerCallBack*	ApcCallBack,
+	int lNetworkEvents
+) {
+	/// <summary>
+	/// 开启服务器的APC异步select模式，只能初始化一次
+	/// </summary>
+	/// <param name="ApcCallBack">回调函数</param>
+	/// <param name="lNetworkEvents">需要异步处理的事件</param>
+	/// <returns>返回异步处理线程的句柄</returns>
+	if (this->m_CallBack != NULL) {
+		return INVALID_HANDLE_VALUE;
+	}
+	EnterCriticalSection(&this->m_CriticalSection);
+	this->m_EnableEvent = lNetworkEvents;
+	this->m_CallBack = ApcCallBack;
+	//下面将把m_AllClientSocket已有的句柄拷贝到m_NeedAPCSocket
+	std::copy(m_AllClientSocket.begin(), m_AllClientSocket.end(), m_NeedAPCSocket.begin());
+	//将服务器socket加入m_NeedAPCSocket
+	m_NeedAPCSocket.push_back(this->m_socket);
+	//启动线程
+	m_ThreadHandle = CreateThread(NULL, 0, (PTHREAD_START_ROUTINE)internal_APCThread, this, 0, NULL);
+	LeaveCriticalSection(&this->m_CriticalSection);
+	return m_ThreadHandle;
+}
+```
+   - 就是利用WSPProcessAsyncSelect函数实现APC异步选择
+   - 当select状态改变时，程序会通知internal_APCRoutine，internal_APCRoutine再进行回调函数的分发和下一次AsyncSelect的调用。
+   - 写得不是很精简，勉强能用吧。
+   - 这种APC方法省去了IOCP模型中很多复杂的步骤，可以说是一个最精简的异步模型了。
+
+# 测试：
+   - Client端请求“http://www.baidu.com/index.html”测试：![](./image/Client.gif)
+   - Server端1000连接测试：![](./image/Server.gif)
+   - 测试Server端上万连接，APC效率基本无损失。
