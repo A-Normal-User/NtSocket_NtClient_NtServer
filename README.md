@@ -142,6 +142,11 @@ SOCKET WSPSocket(
    - 创建出socket句柄后，剩下的事情就非常简单了，只需要根据不同的“IOCTL_AFD_”写出各个函数即可。
    - 最难的部分其实是WSPProcessAsyncSelect函数。
    - 这个需要从WSPAsyncSelect函数说起
-   - 使用IDA看一下mswsock.WSPAsyncSelect函数，大概长这个样子：![](./image/WSPAsyncSelect.jpg)
-   - 其中最重要的函数是SockCheckAndInitAsyncSelectHelper：
+   - 使用IDA看一下mswsock.WSPAsyncSelect函数，大概长这个样子：![](./image/Async.jpg)
+   - 其中最重要的函数是SockCheckAndInitAsyncSelectHelper：![](./image/complet.jpg)
+   - SockCheckAndInitAsyncSelectHelper函数先创建了一个\\Device\\Afd\\AsyncSelectHlp的IO（功能未知），**然后用SockCreateAsyncQueuePort函数创建了一个完成端口**
+   - 接着用NtSetInformationFile函数将完成端口和\\Device\\Afd\\AsyncSelectHlp绑定。
+   - 在SockAsyncSelectCompletion函数中找到SockProcessAsyncSelect：![](./image/SockAsyncSelectCompletion.png)
+   - 在SockProcessAsyncSelect中找到AsyncSelect真正实现原理：![](./image/SockProcessAsyncSelect.png)
+   - （别问我怎么找的，参看ReactOS源码就会很清晰）
 
