@@ -1,0 +1,2 @@
+# NtSocket_NtClient_NtServer
+Using NtCreateFile and NtDeviceIoControlFile to realize the function of winsock（利用NtCreateFile和NtDeviceIoControlFile 实现winsock的功能）
