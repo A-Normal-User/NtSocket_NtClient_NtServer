@@ -32,7 +32,7 @@
 
 # 正文：
    - 最基础的内容，利用NtCreateFile创建socket句柄：
-```
+```cpp
 SOCKET WSPSocket(
 	int AddressFamily,
 	int SocketType,
@@ -140,3 +140,4 @@ SOCKET WSPSocket(
    - 从总体上看来，这部分代码是最简单的，用NtCreateFile创建\\Device\\Afd\\Endpoint的连接，麻烦一点的可能是传递的EaBuffer，不过这部分可以直接通过CE拦截的方式获取数据，也可以参考ReactOS的结构体，我选择了一种介于两者之间的方法实现。
    - 这部分的兼容性也是最难实现的，因为不知道不同的系统的结构体会不会有差异，不过我测试基本是没有问题的。
    - 创建出socket句柄后，剩下的事情就非常简单了，只需要根据不同的“IOCTL_AFD_”写出各个函数即可。
+   - 最难的部分其实是WSPProcessAsyncSelect函数
