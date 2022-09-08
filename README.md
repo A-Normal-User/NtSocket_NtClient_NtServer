@@ -290,6 +290,6 @@ HANDLE WSPServer::APCAsyncSelect(
    - 这种APC方法省去了IOCP模型中很多复杂的步骤，可以说是一个最精简的异步模型了。
 
 # 测试：
-   - Client端请求“http://www.baidu.com/index.html”测试：![](./image/Client.gif)
+   - Client端请求"http:\/\/www\.baidu\.com\/index\.html"测试：![](./image/Client.gif)
    - Server端1000连接测试：![](./image/Server.gif)
    - 测试Server端上万连接，APC效率基本无损失。
